@@ -79,7 +79,7 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
                 .with_context(|| format!("failed to create: {}", output_path.display()))?;
 
             let writer_props = WriterProperties::builder()
-                .set_compression(Compression::ZSTD(Default::default()))
+                .set_compression(Compression::SNAPPY)
                 .set_column_dictionary_enabled("_timestamp".into(), false)
                 .set_column_encoding("_timestamp".into(), Encoding::DELTA_BINARY_PACKED)
                 .build();
