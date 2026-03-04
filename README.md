@@ -15,7 +15,7 @@ cargo build --release
 Add an auto-incrementing `_timestamp` (i64) column to all parquet files in a directory. Files are processed in parallel; timestamps are globally ordered by sorted filename.
 
 ```bash
-clickbench-convert add-timestamp --input clickbench/parquet --output clickbench/parquet_with_ts
+cargo r --release -- add-timestamp --input clickbench/parquet --output clickbench/parquet_ts
 ```
 
 ### to-vortex
@@ -23,7 +23,7 @@ clickbench-convert add-timestamp --input clickbench/parquet --output clickbench/
 Convert parquet files to Vortex format.
 
 ```bash
-clickbench-convert to-vortex --input clickbench/parquet_with_ts --output clickbench/vortex
+cargo r --release to-vortex --input clickbench/parquet_ts --output clickbench/vortex_ts
 ```
 
 ## Typical workflow
