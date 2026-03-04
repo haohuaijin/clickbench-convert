@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+arrow = "57"
+parquet = "57"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "macros"] }
+vortex = { git = "https://github.com/openobserve/vortex", rev = "7f3491d604b1e298b9162e174a20a15cf863ff83", features = ["tokio"] }
+anyhow = "1"
