@@ -29,19 +29,29 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
         row_counts.push(builder.metadata().file_metadata().num_rows());
     }
 
-    // Phase 2: Compute starting timestamps via prefix sum (file name order)
+    // Phase 2: Assign each file to its own 1-hour bucket [hour_start, hour_start + 1h)
     // Base: 2026-02-01 00:00:00 UTC = 1769904000 seconds since epoch = 1769904000000000 us
     const BASE_TS_US: i64 = 1_769_904_000_000_000;
-    const STEP_US: i64 = 10_000;
+    const ONE_HOUR_US: i64 = 3_600_000_000; // 1 hour in microseconds
 
-    let mut start_timestamps: Vec<i64> = Vec::with_capacity(files.len());
-    let mut cumulative: i64 = 0;
-    for &count in &row_counts {
-        // Each file's first row gets the highest timestamp in its range
-        start_timestamps.push(BASE_TS_US + (cumulative + count - 1) * STEP_US);
-        cumulative += count;
+    // For each file: hour_start = BASE + i * ONE_HOUR, step = ONE_HOUR / row_count
+    // Timestamps: hour_start + j * step for j in 0..row_count
+    // All timestamps stay within [hour_start, hour_start + ONE_HOUR)
+    struct FileTimestampInfo {
+        hour_start: i64,
+        step_us: i64,
     }
-    let total_rows = cumulative;
+    let mut ts_infos: Vec<FileTimestampInfo> = Vec::with_capacity(files.len());
+    let mut total_rows: i64 = 0;
+    for (i, &count) in row_counts.iter().enumerate() {
+        let hour_start = BASE_TS_US + i as i64 * ONE_HOUR_US;
+        let step_us = if count <= 1 { 0 } else { ONE_HOUR_US / count };
+        ts_infos.push(FileTimestampInfo {
+            hour_start,
+            step_us,
+        });
+        total_rows += count;
+    }
 
     println!(
         "Total rows across all files: {}. Processing with {} threads...",
@@ -62,7 +72,8 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
     for (i, path) in files.into_iter().enumerate() {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
         let output_dir = output_dir.clone();
-        let start_ts = start_timestamps[i];
+        let hour_start = ts_infos[i].hour_start;
+        let step_us = ts_infos[i].step_us;
 
         handles.push(tokio::task::spawn_blocking(move || -> Result<()> {
             let _permit = permit;
@@ -92,15 +103,16 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
             let mut writer =
                 ArrowWriter::try_new(out_file, new_schema.clone(), Some(writer_props))?;
 
-            let mut timestamp = start_ts;
+            let mut row_offset: i64 = 0;
             for batch_result in reader {
                 let batch = batch_result?;
                 let num_rows = batch.num_rows();
 
+                // Timestamps: hour_start + j * step_us, ascending within [hour_start, hour_start + 1h)
                 let timestamps: Vec<i64> = (0..num_rows as i64)
-                    .map(|i| timestamp - i * STEP_US)
+                    .map(|j| hour_start + (row_offset + j) * step_us)
                     .collect();
-                timestamp -= num_rows as i64 * STEP_US;
+                row_offset += num_rows as i64;
 
                 let ts_array = Int64Array::from(timestamps);
 
@@ -112,11 +124,14 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
             }
 
             writer.close()?;
+            let last_ts = hour_start + (row_offset - 1).max(0) * step_us;
             println!(
-                "  -> {} (timestamp range: {}..{})",
+                "  -> {} (hour bucket: {}..{}, timestamp range: {}..{})",
                 output_path.display(),
-                start_ts,
-                timestamp
+                hour_start,
+                hour_start + ONE_HOUR_US,
+                hour_start,
+                last_ts
             );
             Ok(())
         }));
