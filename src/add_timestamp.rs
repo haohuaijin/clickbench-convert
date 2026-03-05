@@ -77,11 +77,7 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
 
             let original_schema = reader.schema();
             let mut fields: Vec<Arc<Field>> = original_schema.fields().iter().cloned().collect();
-            fields.push(Arc::new(Field::new(
-                "_timestamp",
-                DataType::Int64,
-                false,
-            )));
+            fields.push(Arc::new(Field::new("_timestamp", DataType::Int64, false)));
             let new_schema = Arc::new(Schema::new(fields));
 
             let out_file = File::create(&output_path)
