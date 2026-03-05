@@ -209,12 +209,7 @@ fn collect_files(dir: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
         .collect();
     files.sort_by(|a, b| {
         let num = |p: &PathBuf| -> Option<i64> {
-            p.file_stem()?
-                .to_str()?
-                .rsplit('_')
-                .next()?
-                .parse()
-                .ok()
+            p.file_stem()?.to_str()?.rsplit('_').next()?.parse().ok()
         };
         match (num(a), num(b)) {
             (Some(na), Some(nb)) => na.cmp(&nb),
