@@ -33,48 +33,6 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
     let reader = SerializedFileReader::new(file)?;
     let metadata = reader.metadata();
 
-    // Try key-value metadata first (OpenObserve format)
-    if let Some(kv_metadata) = metadata.file_metadata().key_value_metadata() {
-        let mut min_ts = 0i64;
-        let mut max_ts = 0i64;
-        let mut records = 0i64;
-        let mut found = false;
-        for kv in kv_metadata {
-            match kv.key.as_str() {
-                "min_ts" => {
-                    min_ts = kv.value.as_ref().unwrap().parse()?;
-                    found = true;
-                }
-                "max_ts" => {
-                    max_ts = kv.value.as_ref().unwrap().parse()?;
-                    found = true;
-                }
-                "records" => {
-                    records = kv.value.as_ref().unwrap().parse()?;
-                    found = true;
-                }
-                _ => {}
-            }
-        }
-        if found && min_ts > 0 && max_ts > 0 {
-            // Read Arrow schema
-            let file = std::fs::File::open(path)?;
-            let arrow_schema = ParquetRecordBatchReaderBuilder::try_new(file)?
-                .schema()
-                .as_ref()
-                .clone();
-            return Ok(FileMeta {
-                min_ts,
-                max_ts,
-                records,
-                original_size: ORIGINAL_SIZE,
-                compressed_size,
-                arrow_schema: Some(arrow_schema),
-            });
-        }
-    }
-
-    // Fall back to row group statistics
     let schema_descr = metadata.file_metadata().schema_descr();
     let ts_col_idx = schema_descr
         .columns()
