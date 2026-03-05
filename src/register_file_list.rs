@@ -352,17 +352,15 @@ fn upsert_stream_stats(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn register_file_list(
     db_path: &Path,
     input_dir: &Path,
     data_dir: Option<&Path>,
-    org: &str,
-    stream_type: &str,
     stream_name: &str,
-    account: &str,
-    _parquet_metadata_dir: Option<&Path>,
 ) -> Result<()> {
+    let org = "default";
+    let stream_type = "logs";
+    let account = "";
     let files = collect_files(input_dir, &["parquet", "vortex"])?;
     if files.is_empty() {
         bail!(

@@ -36,7 +36,6 @@ clickbench-convert register-file-list \
   --db /path/to/openobserve/db/metadata.sqlite \
   --input clickbench/parquet_ts \
   --data-dir /path/to/openobserve \
-  --stream-type logs \
   --stream-name hits
 
 # Register vortex files (metadata is read directly from the vortex footer)
@@ -44,7 +43,6 @@ clickbench-convert register-file-list \
   --db /path/to/openobserve/db/metadata.sqlite \
   --input clickbench/vortex_ts \
   --data-dir /path/to/openobserve \
-  --stream-type logs \
   --stream-name hits
 ```
 
@@ -53,11 +51,7 @@ clickbench-convert register-file-list \
 | `--db` | Path to the SQLite database file | (required) |
 | `-i, --input` | Directory containing `.parquet` or `.vortex` files | (required) |
 | `--data-dir` | OpenObserve data directory. Files are copied to `{data-dir}/stream/files/...` | (optional) |
-| `--stream-type` | Stream type (e.g., `logs`) | (required) |
 | `--stream-name` | Stream name (e.g., `hits`) | (required) |
-| `--org` | Organization ID | `default` |
-| `--account` | Storage account name | `""` |
-| `--parquet-metadata-dir` | Directory with corresponding parquet files for vortex metadata lookup | (optional) |
 
 This command performs the following:
 1. **Inserts file metadata** into the `file_list` table (idempotent — duplicates are skipped)
@@ -81,12 +75,12 @@ cargo run --release -- register-file-list \
   --db ./data/openobserve/db/metadata.sqlite \
   --data-dir ./data/openobserve \
   -i clickbench/parquet_ts \
-  --stream-type logs --stream-name hits
+  --stream-name hits
 
 # Or register vortex files instead (reads metadata from vortex footer)
 cargo run --release -- register-file-list \
   --db ./data/openobserve/db/metadata.sqlite \
   --data-dir ./data/openobserve \
   -i clickbench/vortex_ts \
-  --stream-type logs --stream-name hits
+  --stream-name hits
 ```

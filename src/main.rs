@@ -47,21 +47,9 @@ enum Commands {
         /// OpenObserve data directory (e.g., ./data/openobserve/). Files will be copied to {data-dir}/stream/files/...
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Organization ID (e.g., "default")
-        #[arg(long, default_value = "default")]
-        org: String,
-        /// Stream type (e.g., "logs")
-        #[arg(long)]
-        stream_type: String,
         /// Stream name (e.g., "hits")
         #[arg(long)]
         stream_name: String,
-        /// Storage account name
-        #[arg(long, default_value = "")]
-        account: String,
-        /// Directory containing corresponding parquet files (for vortex metadata lookup)
-        #[arg(long)]
-        parquet_metadata_dir: Option<PathBuf>,
     },
 }
 
@@ -80,23 +68,10 @@ async fn main() -> Result<()> {
             db,
             input,
             data_dir,
-            org,
-            stream_type,
             stream_name,
-            account,
-            parquet_metadata_dir,
         } => {
-            register_file_list::register_file_list(
-                &db,
-                &input,
-                data_dir.as_deref(),
-                &org,
-                &stream_type,
-                &stream_name,
-                &account,
-                parquet_metadata_dir.as_deref(),
-            )
-            .await?;
+            register_file_list::register_file_list(&db, &input, data_dir.as_deref(), &stream_name)
+                .await?;
         }
     }
 
