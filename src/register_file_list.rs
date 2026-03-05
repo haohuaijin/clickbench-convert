@@ -164,13 +164,8 @@ fn copy_to_data_dir(
         .with_context(|| format!("failed to create directory: {}", dest_dir.display()))?;
     let dest = dest_dir.join(filename);
     if !dest.exists() {
-        std::fs::copy(src, &dest).with_context(|| {
-            format!(
-                "failed to copy {} -> {}",
-                src.display(),
-                dest.display()
-            )
-        })?;
+        std::fs::copy(src, &dest)
+            .with_context(|| format!("failed to copy {} -> {}", src.display(), dest.display()))?;
     }
     Ok(dest)
 }
@@ -225,6 +220,7 @@ fn insert_schema(
 }
 
 /// Insert or update stream_stats for the stream.
+#[allow(clippy::too_many_arguments)]
 fn upsert_stream_stats(
     conn: &Connection,
     org: &str,
@@ -379,7 +375,14 @@ pub fn register_file_list(
         if !schema_inserted {
             let arrow_schema = read_parquet_arrow_schema(&parquet_path_for_schema)
                 .with_context(|| "failed to read arrow schema")?;
-            insert_schema(&conn, org, stream_type, stream_name, &arrow_schema, meta.min_ts)?;
+            insert_schema(
+                &conn,
+                org,
+                stream_type,
+                stream_name,
+                &arrow_schema,
+                meta.min_ts,
+            )?;
             schema_inserted = true;
         }
 
