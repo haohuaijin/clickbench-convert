@@ -33,5 +33,5 @@ clickbench-convert to-vortex --input clickbench/parquet_ts --output clickbench/v
 cargo run --release -- add-timestamp -i clickbench/parquet -o clickbench/parquet_ts
 
 # 2. Convert the timestamped parquet files to Vortex format
-cargo run --release -- to-vortex -i clickbench/parquet_ts -o clickbench/vortex
+cargo run --release -- to-vortex -i clickbench/parquet_ts -o clickbench/vortex_ts
 ```
