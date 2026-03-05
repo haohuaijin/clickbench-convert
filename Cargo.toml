@@ -10,3 +10,5 @@ parquet = "57"
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "macros"] }
 vortex = { version = "0.60.0", features = ["tokio"] }
 anyhow = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = "0.4"

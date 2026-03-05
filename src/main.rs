@@ -1,5 +1,6 @@
 mod add_timestamp;
 mod compressor;
+mod register_file_list;
 mod to_vortex;
 
 use std::path::{Path, PathBuf};
@@ -35,6 +36,30 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Register parquet/vortex files into OpenObserve's file_list SQLite table
+    RegisterFileList {
+        /// Path to the SQLite database file
+        #[arg(long)]
+        db: PathBuf,
+        /// Input directory containing parquet or vortex files
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Organization ID (e.g., "default")
+        #[arg(long, default_value = "default")]
+        org: String,
+        /// Stream type (e.g., "logs")
+        #[arg(long)]
+        stream_type: String,
+        /// Stream name (e.g., "hits")
+        #[arg(long)]
+        stream_name: String,
+        /// Storage account name
+        #[arg(long, default_value = "")]
+        account: String,
+        /// Directory containing corresponding parquet files (for vortex metadata lookup)
+        #[arg(long)]
+        parquet_metadata_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -47,6 +72,25 @@ async fn main() -> Result<()> {
         }
         Commands::ToVortex { input, output } => {
             to_vortex::to_vortex(&input, &output).await?;
+        }
+        Commands::RegisterFileList {
+            db,
+            input,
+            org,
+            stream_type,
+            stream_name,
+            account,
+            parquet_metadata_dir,
+        } => {
+            register_file_list::register_file_list(
+                &db,
+                &input,
+                &org,
+                &stream_type,
+                &stream_name,
+                &account,
+                parquet_metadata_dir.as_deref(),
+            )?;
         }
     }
 
