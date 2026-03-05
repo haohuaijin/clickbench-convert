@@ -7,6 +7,15 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::statistics::Statistics;
 use rusqlite::Connection;
+use vortex::VortexSessionDefault;
+use vortex::array::expr::stats::Stat;
+use vortex::dtype::DType;
+use vortex::file::OpenOptionsSessionExt;
+use vortex::io::session::RuntimeSessionExt;
+use vortex::session::VortexSession;
+
+/// 2.1 GB in bytes — fixed original_size for all files.
+const ORIGINAL_SIZE: i64 = 2_100_000_000;
 
 struct FileMeta {
     min_ts: i64,
@@ -14,6 +23,7 @@ struct FileMeta {
     records: i64,
     original_size: i64,
     compressed_size: i64,
+    arrow_schema: Option<Schema>,
 }
 
 fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
@@ -25,37 +35,42 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
 
     // Try key-value metadata first (OpenObserve format)
     if let Some(kv_metadata) = metadata.file_metadata().key_value_metadata() {
-        let mut meta = FileMeta {
-            min_ts: 0,
-            max_ts: 0,
-            records: 0,
-            original_size: 0,
-            compressed_size,
-        };
+        let mut min_ts = 0i64;
+        let mut max_ts = 0i64;
+        let mut records = 0i64;
         let mut found = false;
         for kv in kv_metadata {
             match kv.key.as_str() {
                 "min_ts" => {
-                    meta.min_ts = kv.value.as_ref().unwrap().parse()?;
+                    min_ts = kv.value.as_ref().unwrap().parse()?;
                     found = true;
                 }
                 "max_ts" => {
-                    meta.max_ts = kv.value.as_ref().unwrap().parse()?;
+                    max_ts = kv.value.as_ref().unwrap().parse()?;
                     found = true;
                 }
                 "records" => {
-                    meta.records = kv.value.as_ref().unwrap().parse()?;
-                    found = true;
-                }
-                "original_size" => {
-                    meta.original_size = kv.value.as_ref().unwrap().parse()?;
+                    records = kv.value.as_ref().unwrap().parse()?;
                     found = true;
                 }
                 _ => {}
             }
         }
-        if found && meta.min_ts > 0 && meta.max_ts > 0 {
-            return Ok(meta);
+        if found && min_ts > 0 && max_ts > 0 {
+            // Read Arrow schema
+            let file = std::fs::File::open(path)?;
+            let arrow_schema = ParquetRecordBatchReaderBuilder::try_new(file)?
+                .schema()
+                .as_ref()
+                .clone();
+            return Ok(FileMeta {
+                min_ts,
+                max_ts,
+                records,
+                original_size: ORIGINAL_SIZE,
+                compressed_size,
+                arrow_schema: Some(arrow_schema),
+            });
         }
     }
 
@@ -69,12 +84,10 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
     let mut records: i64 = 0;
     let mut min_ts = i64::MAX;
     let mut max_ts = i64::MIN;
-    let mut original_size: i64 = 0;
 
     for rg_idx in 0..metadata.num_row_groups() {
         let rg = metadata.row_group(rg_idx);
         records += rg.num_rows();
-        original_size += rg.total_byte_size();
 
         if let Some(idx) = ts_col_idx {
             let col_meta = rg.column(idx);
@@ -98,21 +111,78 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
         );
     }
 
+    // Read Arrow schema
+    let file = std::fs::File::open(path)?;
+    let arrow_schema = ParquetRecordBatchReaderBuilder::try_new(file)?
+        .schema()
+        .as_ref()
+        .clone();
+
     Ok(FileMeta {
         min_ts,
         max_ts,
         records,
-        original_size,
+        original_size: ORIGINAL_SIZE,
         compressed_size,
+        arrow_schema: Some(arrow_schema),
     })
 }
 
-/// Read the Arrow schema from a parquet file.
-fn read_parquet_arrow_schema(path: &Path) -> Result<Schema> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("failed to open: {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    Ok(reader.schema().as_ref().clone())
+/// Read metadata from a vortex file footer (row count, min/max _timestamp from statistics).
+async fn read_vortex_metadata(path: &Path) -> Result<FileMeta> {
+    let compressed_size = std::fs::metadata(path)?.len() as i64;
+
+    let session = VortexSession::default().with_tokio();
+    let file = session
+        .open_options()
+        .open_path(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to open vortex file {}: {}", path.display(), e))?;
+
+    let records = file.row_count() as i64;
+
+    // Get Arrow schema from DType
+    let arrow_schema = file
+        .dtype()
+        .to_arrow_schema()
+        .map_err(|e| anyhow::anyhow!("failed to convert vortex dtype to arrow schema: {e}"))?;
+
+    // Find _timestamp column index and extract min/max from file statistics
+    let mut min_ts = i64::MAX;
+    let mut max_ts = i64::MIN;
+
+    if let DType::Struct(struct_fields, _) = file.dtype() {
+        let ts_idx = struct_fields
+            .names()
+            .iter()
+            .position(|name| name.as_ref() == "_timestamp");
+
+        if let (Some(idx), Some(file_stats)) = (ts_idx, file.file_stats()) {
+            let (stats_set, col_dtype) = file_stats.get(idx);
+            if let Some(min_val) = stats_set.get_as::<i64>(Stat::Min, col_dtype) {
+                min_ts = min_val.into_inner();
+            }
+            if let Some(max_val) = stats_set.get_as::<i64>(Stat::Max, col_dtype) {
+                max_ts = max_val.into_inner();
+            }
+        }
+    }
+
+    if min_ts == i64::MAX || max_ts == i64::MIN {
+        bail!(
+            "no _timestamp statistics found in vortex file {}",
+            path.display()
+        );
+    }
+
+    Ok(FileMeta {
+        min_ts,
+        max_ts,
+        records,
+        original_size: ORIGINAL_SIZE,
+        compressed_size,
+        arrow_schema: Some(arrow_schema),
+    })
 }
 
 fn date_key_from_ts(ts_us: i64) -> String {
@@ -137,12 +207,24 @@ fn collect_files(dir: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
             }
         })
         .collect();
-    files.sort();
+    files.sort_by(|a, b| {
+        let num = |p: &PathBuf| -> Option<i64> {
+            p.file_stem()?
+                .to_str()?
+                .rsplit('_')
+                .next()?
+                .parse()
+                .ok()
+        };
+        match (num(a), num(b)) {
+            (Some(na), Some(nb)) => na.cmp(&nb),
+            _ => a.cmp(b),
+        }
+    });
     Ok(files)
 }
 
 /// Copy a file to the OpenObserve stream data directory.
-/// Returns the destination path.
 fn copy_to_data_dir(
     src: &Path,
     data_dir: &Path,
@@ -152,7 +234,6 @@ fn copy_to_data_dir(
     date_key: &str,
     filename: &str,
 ) -> Result<PathBuf> {
-    // OpenObserve stores files at: {data_dir}/stream/files/{org}/{stream_type}/{stream_name}/{YYYY}/{MM}/{DD}/{HH}/{filename}
     let dest_dir = data_dir
         .join("stream")
         .join("files")
@@ -171,7 +252,6 @@ fn copy_to_data_dir(
 }
 
 /// Insert the stream schema into the meta table (OpenObserve format).
-/// Schema is stored as JSON-serialized Vec<Schema> with metadata containing created_at and start_dt.
 fn insert_schema(
     conn: &Connection,
     org: &str,
@@ -180,7 +260,6 @@ fn insert_schema(
     schema: &Schema,
     start_dt: i64,
 ) -> Result<()> {
-    // Check if schema already exists
     let key2 = format!("{stream_type}/{stream_name}");
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM meta WHERE module = 'schema' AND key1 = ?1 AND key2 = ?2",
@@ -193,7 +272,6 @@ fn insert_schema(
         return Ok(());
     }
 
-    // Add OpenObserve-required metadata to the schema
     let mut metadata = schema.metadata().clone();
     if !metadata.contains_key("created_at") {
         metadata.insert("created_at".to_string(), start_dt.to_string());
@@ -203,7 +281,6 @@ fn insert_schema(
     }
     let schema_with_meta = schema.clone().with_metadata(metadata);
 
-    // OpenObserve stores schemas as JSON-serialized Vec<Schema>
     let schemas = vec![schema_with_meta];
     let value = serde_json::to_string(&schemas)?;
 
@@ -235,7 +312,6 @@ fn upsert_stream_stats(
 ) -> Result<()> {
     let stream_key = format!("{org}/{stream_type}/{stream_name}");
 
-    // Check if stream_stats table exists and has data
     let exists: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 FROM stream_stats WHERE stream = ?1 AND is_recent = FALSE",
@@ -282,7 +358,7 @@ fn upsert_stream_stats(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn register_file_list(
+pub async fn register_file_list(
     db_path: &Path,
     input_dir: &Path,
     data_dir: Option<&Path>,
@@ -290,7 +366,7 @@ pub fn register_file_list(
     stream_type: &str,
     stream_name: &str,
     account: &str,
-    parquet_metadata_dir: Option<&Path>,
+    _parquet_metadata_dir: Option<&Path>,
 ) -> Result<()> {
     let files = collect_files(input_dir, &["parquet", "vortex"])?;
     if files.is_empty() {
@@ -334,53 +410,23 @@ pub fn register_file_list(
             .and_then(|s| s.to_str())
             .context("invalid filename")?;
 
-        // Resolve the parquet file for metadata (and schema)
-        let (meta, registered_filename, parquet_path_for_schema) = match ext {
-            "parquet" => {
-                let meta = read_parquet_metadata(path)
-                    .with_context(|| format!("failed to read metadata: {}", path.display()))?;
-                (meta, filename.to_string(), path.to_path_buf())
-            }
-            "vortex" => {
-                let parquet_dir = parquet_metadata_dir.unwrap_or(input_dir);
-                let parquet_name = format!(
-                    "{}.parquet",
-                    path.file_stem().and_then(|s| s.to_str()).unwrap()
-                );
-                let parquet_path = parquet_dir.join(&parquet_name);
-
-                if !parquet_path.exists() {
-                    println!(
-                        "  SKIP: {} (no corresponding parquet file at {})",
-                        filename,
-                        parquet_path.display()
-                    );
-                    skipped += 1;
-                    continue;
-                }
-
-                let mut meta = read_parquet_metadata(&parquet_path).with_context(|| {
-                    format!(
-                        "failed to read parquet metadata: {}",
-                        parquet_path.display()
-                    )
-                })?;
-                meta.compressed_size = std::fs::metadata(path)?.len() as i64;
-                (meta, filename.to_string(), parquet_path)
-            }
+        let meta = match ext {
+            "parquet" => read_parquet_metadata(path)
+                .with_context(|| format!("failed to read metadata: {}", path.display()))?,
+            "vortex" => read_vortex_metadata(path)
+                .await
+                .with_context(|| format!("failed to read vortex metadata: {}", path.display()))?,
             _ => continue,
         };
 
-        // Insert schema from the first file (all files in a stream share the same schema)
-        if !schema_inserted {
-            let arrow_schema = read_parquet_arrow_schema(&parquet_path_for_schema)
-                .with_context(|| "failed to read arrow schema")?;
+        // Insert schema from the first file
+        if !schema_inserted && let Some(ref arrow_schema) = meta.arrow_schema {
             insert_schema(
                 &conn,
                 org,
                 stream_type,
                 stream_name,
-                &arrow_schema,
+                arrow_schema,
                 meta.min_ts,
             )?;
             schema_inserted = true;
@@ -397,13 +443,12 @@ pub fn register_file_list(
                 stream_type,
                 stream_name,
                 &date_key,
-                &registered_filename,
+                filename,
             )?;
         }
 
         // Construct the full file key as OpenObserve expects
-        let file_key =
-            format!("files/{org}/{stream_type}/{stream_name}/{date_key}/{registered_filename}");
+        let file_key = format!("files/{org}/{stream_type}/{stream_name}/{date_key}/{filename}");
         let (_, parsed_date, parsed_file) =
             parse_file_key_columns(&file_key).context("failed to parse file key")?;
 
@@ -497,7 +542,6 @@ pub fn register_file_list(
 }
 
 /// Parse file key into (stream_key, date_key, file_name), matching OpenObserve's format.
-/// Key format: files/{org}/{stream_type}/{stream_name}/{YYYY}/{MM}/{DD}/{HH}/{filename}
 fn parse_file_key_columns(key: &str) -> Result<(String, String, String)> {
     let columns: Vec<&str> = key.splitn(9, '/').collect();
     if columns.len() < 9 {

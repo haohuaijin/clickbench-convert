@@ -95,7 +95,8 @@ async fn main() -> Result<()> {
                 &stream_name,
                 &account,
                 parquet_metadata_dir.as_deref(),
-            )?;
+            )
+            .await?;
         }
     }
 
@@ -115,6 +116,19 @@ pub(crate) fn collect_parquet_files(dir: &Path) -> Result<Vec<PathBuf>> {
             }
         })
         .collect();
-    files.sort();
+    files.sort_by(|a, b| {
+        let num = |p: &PathBuf| -> Option<i64> {
+            p.file_stem()?
+                .to_str()?
+                .rsplit('_')
+                .next()?
+                .parse()
+                .ok()
+        };
+        match (num(a), num(b)) {
+            (Some(na), Some(nb)) => na.cmp(&nb),
+            _ => a.cmp(b),
+        }
+    });
     Ok(files)
 }

@@ -39,14 +39,13 @@ clickbench-convert register-file-list \
   --stream-type logs \
   --stream-name hits
 
-# Register vortex files (reads metadata from corresponding parquet files)
+# Register vortex files (metadata is read directly from the vortex footer)
 clickbench-convert register-file-list \
   --db /path/to/openobserve/db/metadata.sqlite \
   --input clickbench/vortex_ts \
   --data-dir /path/to/openobserve \
   --stream-type logs \
-  --stream-name hits \
-  --parquet-metadata-dir clickbench/parquet_ts
+  --stream-name hits
 ```
 
 | Flag | Description | Default |
@@ -66,7 +65,7 @@ This command performs the following:
 3. **Updates `stream_stats`** with aggregated file/record/timestamp counts
 4. **Copies files** to the OpenObserve stream data directory (if `--data-dir` is provided): `{data-dir}/stream/files/{org}/{stream_type}/{stream_name}/{YYYY}/{MM}/{DD}/{HH}/{filename}`
 
-For parquet files, metadata (`min_ts`, `max_ts`, `records`, `original_size`) is read from the parquet footer. For vortex files, metadata is read from the corresponding parquet file (same basename, `.parquet` extension) found in `--parquet-metadata-dir` (or `--input` if not specified).
+For parquet files, metadata (`min_ts`, `max_ts`, `records`) is read from the parquet footer. For vortex files, metadata is read directly from the vortex file footer (row count, min/max timestamps from statistics, and Arrow schema from DType). All files use a fixed `original_size` of 2.1 GB.
 
 ## Typical workflow
 
@@ -84,11 +83,10 @@ cargo run --release -- register-file-list \
   -i clickbench/parquet_ts \
   --stream-type logs --stream-name hits
 
-# Or register vortex files instead
+# Or register vortex files instead (reads metadata from vortex footer)
 cargo run --release -- register-file-list \
   --db ./data/openobserve/db/metadata.sqlite \
   --data-dir ./data/openobserve \
   -i clickbench/vortex_ts \
-  --stream-type logs --stream-name hits \
-  --parquet-metadata-dir clickbench/parquet_ts
+  --stream-type logs --stream-name hits
 ```
