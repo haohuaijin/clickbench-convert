@@ -44,6 +44,9 @@ enum Commands {
         /// Input directory containing parquet or vortex files
         #[arg(short, long)]
         input: PathBuf,
+        /// OpenObserve data directory (e.g., ./data/openobserve/). Files will be copied to {data-dir}/stream/files/...
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
         /// Organization ID (e.g., "default")
         #[arg(long, default_value = "default")]
         org: String,
@@ -76,6 +79,7 @@ async fn main() -> Result<()> {
         Commands::RegisterFileList {
             db,
             input,
+            data_dir,
             org,
             stream_type,
             stream_name,
@@ -85,6 +89,7 @@ async fn main() -> Result<()> {
             register_file_list::register_file_list(
                 &db,
                 &input,
+                data_dir.as_deref(),
                 &org,
                 &stream_type,
                 &stream_name,

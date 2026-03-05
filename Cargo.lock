@@ -314,6 +314,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c872d36b7bf2a6a6a2b40de9156265f0242910791db366a2c17476ba8330d68"
 dependencies = [
  "bitflags",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -729,10 +731,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "arrow-schema",
  "chrono",
  "clap",
  "parquet",
  "rusqlite",
+ "serde_json",
  "tokio",
  "vortex",
 ]
@@ -2174,6 +2178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use arrow::datatypes::Schema;
 use chrono::TimeZone;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::statistics::Statistics;
 use rusqlite::Connection;
@@ -105,6 +107,14 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
     })
 }
 
+/// Read the Arrow schema from a parquet file.
+fn read_parquet_arrow_schema(path: &Path) -> Result<Schema> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed to open: {}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    Ok(reader.schema().as_ref().clone())
+}
+
 fn date_key_from_ts(ts_us: i64) -> String {
     let dt = chrono::Utc
         .timestamp_opt(ts_us / 1_000_000, ((ts_us % 1_000_000) * 1000) as u32)
@@ -131,9 +141,155 @@ fn collect_files(dir: &Path, extensions: &[&str]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Copy a file to the OpenObserve stream data directory.
+/// Returns the destination path.
+fn copy_to_data_dir(
+    src: &Path,
+    data_dir: &Path,
+    org: &str,
+    stream_type: &str,
+    stream_name: &str,
+    date_key: &str,
+    filename: &str,
+) -> Result<PathBuf> {
+    // OpenObserve stores files at: {data_dir}/stream/files/{org}/{stream_type}/{stream_name}/{YYYY}/{MM}/{DD}/{HH}/{filename}
+    let dest_dir = data_dir
+        .join("stream")
+        .join("files")
+        .join(org)
+        .join(stream_type)
+        .join(stream_name)
+        .join(date_key);
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("failed to create directory: {}", dest_dir.display()))?;
+    let dest = dest_dir.join(filename);
+    if !dest.exists() {
+        std::fs::copy(src, &dest).with_context(|| {
+            format!(
+                "failed to copy {} -> {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+    Ok(dest)
+}
+
+/// Insert the stream schema into the meta table (OpenObserve format).
+/// Schema is stored as JSON-serialized Vec<Schema> with metadata containing created_at and start_dt.
+fn insert_schema(
+    conn: &Connection,
+    org: &str,
+    stream_type: &str,
+    stream_name: &str,
+    schema: &Schema,
+    start_dt: i64,
+) -> Result<()> {
+    // Check if schema already exists
+    let key2 = format!("{stream_type}/{stream_name}");
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM meta WHERE module = 'schema' AND key1 = ?1 AND key2 = ?2",
+        rusqlite::params![org, &key2],
+        |row| row.get(0),
+    )?;
+
+    if exists {
+        println!("  Schema already exists for {org}/{stream_type}/{stream_name}, skipping");
+        return Ok(());
+    }
+
+    // Add OpenObserve-required metadata to the schema
+    let mut metadata = schema.metadata().clone();
+    if !metadata.contains_key("created_at") {
+        metadata.insert("created_at".to_string(), start_dt.to_string());
+    }
+    if !metadata.contains_key("start_dt") {
+        metadata.insert("start_dt".to_string(), start_dt.to_string());
+    }
+    let schema_with_meta = schema.clone().with_metadata(metadata);
+
+    // OpenObserve stores schemas as JSON-serialized Vec<Schema>
+    let schemas = vec![schema_with_meta];
+    let value = serde_json::to_string(&schemas)?;
+
+    conn.execute(
+        "INSERT INTO meta (module, key1, key2, start_dt, value) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params!["schema", org, &key2, start_dt, &value],
+    )?;
+
+    println!(
+        "  Schema inserted for {org}/{stream_type}/{stream_name} ({} fields)",
+        schema.fields().len()
+    );
+    Ok(())
+}
+
+/// Insert or update stream_stats for the stream.
+fn upsert_stream_stats(
+    conn: &Connection,
+    org: &str,
+    stream_type: &str,
+    stream_name: &str,
+    file_count: i64,
+    min_ts: i64,
+    max_ts: i64,
+    total_records: i64,
+    total_original_size: i64,
+    total_compressed_size: i64,
+) -> Result<()> {
+    let stream_key = format!("{org}/{stream_type}/{stream_name}");
+
+    // Check if stream_stats table exists and has data
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM stream_stats WHERE stream = ?1 AND is_recent = FALSE",
+            rusqlite::params![&stream_key],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if exists {
+        conn.execute(
+            "UPDATE stream_stats SET file_num = ?1, min_ts = ?2, max_ts = ?3, records = ?4, original_size = ?5, compressed_size = ?6
+             WHERE stream = ?7 AND is_recent = FALSE",
+            rusqlite::params![
+                file_count,
+                min_ts,
+                max_ts,
+                total_records,
+                total_original_size,
+                total_compressed_size,
+                &stream_key,
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO stream_stats (org, stream, file_num, min_ts, max_ts, records, original_size, compressed_size, index_size, is_recent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, FALSE)",
+            rusqlite::params![
+                org,
+                &stream_key,
+                file_count,
+                min_ts,
+                max_ts,
+                total_records,
+                total_original_size,
+                total_compressed_size,
+            ],
+        )?;
+    }
+
+    println!(
+        "  Stream stats updated: files={file_count}, records={total_records}, ts={min_ts}..{max_ts}"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn register_file_list(
     db_path: &Path,
     input_dir: &Path,
+    data_dir: Option<&Path>,
     org: &str,
     stream_type: &str,
     stream_name: &str,
@@ -153,32 +309,27 @@ pub fn register_file_list(
     let conn = Connection::open(db_path)
         .with_context(|| format!("failed to open database: {}", db_path.display()))?;
 
-    // Create file_list table if not exists (matching OpenObserve schema)
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS file_list (
-            id              INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-            account         VARCHAR NOT NULL,
-            org             VARCHAR NOT NULL,
-            stream          VARCHAR NOT NULL,
-            date            VARCHAR NOT NULL,
-            file            VARCHAR NOT NULL,
-            deleted         BOOLEAN DEFAULT FALSE NOT NULL,
-            flattened       BOOLEAN DEFAULT FALSE NOT NULL,
-            min_ts          BIGINT NOT NULL,
-            max_ts          BIGINT NOT NULL,
-            records         BIGINT NOT NULL,
-            original_size   BIGINT NOT NULL,
-            compressed_size BIGINT NOT NULL,
-            index_size      BIGINT NOT NULL,
-            updated_at      BIGINT NOT NULL
-        );",
-    )?;
+    // Detect columns in the existing table
+    let has_created_at = {
+        let mut stmt = conn.prepare("PRAGMA table_info(file_list)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        cols.iter().any(|c| c == "created_at")
+    };
 
     let stream_key = format!("{org}/{stream_type}/{stream_name}");
     let now_us = chrono::Utc::now().timestamp_micros();
 
     let mut inserted = 0;
     let mut skipped = 0;
+    let mut schema_inserted = false;
+    let mut global_min_ts = i64::MAX;
+    let mut global_max_ts = i64::MIN;
+    let mut total_records: i64 = 0;
+    let mut total_original_size: i64 = 0;
+    let mut total_compressed_size: i64 = 0;
 
     for path in &files {
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -187,14 +338,14 @@ pub fn register_file_list(
             .and_then(|s| s.to_str())
             .context("invalid filename")?;
 
-        let (meta, registered_filename) = match ext {
+        // Resolve the parquet file for metadata (and schema)
+        let (meta, registered_filename, parquet_path_for_schema) = match ext {
             "parquet" => {
                 let meta = read_parquet_metadata(path)
                     .with_context(|| format!("failed to read metadata: {}", path.display()))?;
-                (meta, filename.to_string())
+                (meta, filename.to_string(), path.to_path_buf())
             }
             "vortex" => {
-                // For vortex files, read metadata from corresponding parquet file
                 let parquet_dir = parquet_metadata_dir.unwrap_or(input_dir);
                 let parquet_name = format!(
                     "{}.parquet",
@@ -218,46 +369,95 @@ pub fn register_file_list(
                         parquet_path.display()
                     )
                 })?;
-                // Use actual vortex file size as compressed_size
                 meta.compressed_size = std::fs::metadata(path)?.len() as i64;
-                (meta, filename.to_string())
+                (meta, filename.to_string(), parquet_path)
             }
             _ => continue,
         };
 
+        // Insert schema from the first file (all files in a stream share the same schema)
+        if !schema_inserted {
+            let arrow_schema = read_parquet_arrow_schema(&parquet_path_for_schema)
+                .with_context(|| "failed to read arrow schema")?;
+            insert_schema(&conn, org, stream_type, stream_name, &arrow_schema, meta.min_ts)?;
+            schema_inserted = true;
+        }
+
         let date_key = date_key_from_ts(meta.min_ts);
 
-        // Construct the full file key as OpenObserve expects:
-        // files/{org}/{stream_type}/{stream_name}/{YYYY}/{MM}/{DD}/{HH}/{filename}
+        // Copy file to data directory if --data-dir is specified
+        if let Some(data_dir) = data_dir {
+            copy_to_data_dir(
+                path,
+                data_dir,
+                org,
+                stream_type,
+                stream_name,
+                &date_key,
+                &registered_filename,
+            )?;
+        }
+
+        // Construct the full file key as OpenObserve expects
         let file_key =
             format!("files/{org}/{stream_type}/{stream_name}/{date_key}/{registered_filename}");
         let (_, parsed_date, parsed_file) =
             parse_file_key_columns(&file_key).context("failed to parse file key")?;
 
-        let result = conn.execute(
-            "INSERT OR IGNORE INTO file_list
-                (account, org, stream, date, file, deleted, flattened, min_ts, max_ts, records, original_size, compressed_size, index_size, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            rusqlite::params![
-                account,
-                org,
-                &stream_key,
-                &parsed_date,
-                &parsed_file,
-                false,
-                false,
-                meta.min_ts,
-                meta.max_ts,
-                meta.records,
-                meta.original_size,
-                meta.compressed_size,
-                0i64, // index_size
-                now_us,
-            ],
-        )?;
+        let result = if has_created_at {
+            conn.execute(
+                "INSERT OR IGNORE INTO file_list
+                    (account, org, stream, date, file, deleted, flattened, min_ts, max_ts, records, original_size, compressed_size, index_size, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![
+                    account,
+                    org,
+                    &stream_key,
+                    &parsed_date,
+                    &parsed_file,
+                    false,
+                    false,
+                    meta.min_ts,
+                    meta.max_ts,
+                    meta.records,
+                    meta.original_size,
+                    meta.compressed_size,
+                    0i64,
+                    now_us,
+                    now_us,
+                ],
+            )?
+        } else {
+            conn.execute(
+                "INSERT OR IGNORE INTO file_list
+                    (account, org, stream, date, file, deleted, flattened, min_ts, max_ts, records, original_size, compressed_size, index_size, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                rusqlite::params![
+                    account,
+                    org,
+                    &stream_key,
+                    &parsed_date,
+                    &parsed_file,
+                    false,
+                    false,
+                    meta.min_ts,
+                    meta.max_ts,
+                    meta.records,
+                    meta.original_size,
+                    meta.compressed_size,
+                    0i64,
+                    now_us,
+                ],
+            )?
+        };
 
         if result > 0 {
             inserted += 1;
+            global_min_ts = global_min_ts.min(meta.min_ts);
+            global_max_ts = global_max_ts.max(meta.max_ts);
+            total_records += meta.records;
+            total_original_size += meta.original_size;
+            total_compressed_size += meta.compressed_size;
             println!(
                 "  INSERT: {} (records={}, ts={}..{}, date={})",
                 filename, meta.records, meta.min_ts, meta.max_ts, parsed_date
@@ -266,6 +466,22 @@ pub fn register_file_list(
             skipped += 1;
             println!("  SKIP (duplicate): {}", filename);
         }
+    }
+
+    // Update stream_stats
+    if inserted > 0 {
+        upsert_stream_stats(
+            &conn,
+            org,
+            stream_type,
+            stream_name,
+            inserted,
+            global_min_ts,
+            global_max_ts,
+            total_records,
+            total_original_size,
+            total_compressed_size,
+        )?;
     }
 
     println!(
