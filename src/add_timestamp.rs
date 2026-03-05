@@ -30,10 +30,15 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
     }
 
     // Phase 2: Compute starting timestamps via prefix sum (file name order)
+    // Base: 2026-02-01 00:00:00 UTC = 1769904000 seconds since epoch = 1769904000000000 us
+    const BASE_TS_US: i64 = 1_769_904_000_000_000;
+    const STEP_US: i64 = 10_000;
+
     let mut start_timestamps: Vec<i64> = Vec::with_capacity(files.len());
     let mut cumulative: i64 = 0;
     for &count in &row_counts {
-        start_timestamps.push(cumulative);
+        // Each file's first row gets the highest timestamp in its range
+        start_timestamps.push(BASE_TS_US + (cumulative + count - 1) * STEP_US);
         cumulative += count;
     }
     let total_rows = cumulative;
@@ -72,7 +77,11 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
 
             let original_schema = reader.schema();
             let mut fields: Vec<Arc<Field>> = original_schema.fields().iter().cloned().collect();
-            fields.push(Arc::new(Field::new("_timestamp", DataType::Int64, false)));
+            fields.push(Arc::new(Field::new(
+                "_timestamp",
+                DataType::Int64,
+                false,
+            )));
             let new_schema = Arc::new(Schema::new(fields));
 
             let out_file = File::create(&output_path)
@@ -92,8 +101,10 @@ pub async fn add_timestamp(input_dir: &Path, output_dir: &Path) -> Result<()> {
                 let batch = batch_result?;
                 let num_rows = batch.num_rows();
 
-                let timestamps: Vec<i64> = (timestamp..timestamp + num_rows as i64).collect();
-                timestamp += num_rows as i64;
+                let timestamps: Vec<i64> = (0..num_rows as i64)
+                    .map(|i| timestamp - i * STEP_US)
+                    .collect();
+                timestamp -= num_rows as i64 * STEP_US;
 
                 let ts_array = Int64Array::from(timestamps);
 
