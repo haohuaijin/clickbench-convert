@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use arrow::datatypes::Schema;
+use arrow::datatypes::{DataType, Field, Schema};
 use chrono::TimeZone;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -13,6 +13,23 @@ use vortex::dtype::DType;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
+
+/// Convert Utf8View -> Utf8 and BinaryView -> Binary in the schema.
+fn normalize_view_types(schema: &Schema) -> Schema {
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let new_type = match f.data_type() {
+                DataType::Utf8View => DataType::Utf8,
+                DataType::BinaryView => DataType::Binary,
+                other => other.clone(),
+            };
+            Field::new(f.name(), new_type, f.is_nullable()).with_metadata(f.metadata().clone())
+        })
+        .collect();
+    Schema::new(fields).with_metadata(schema.metadata().clone())
+}
 
 /// 2.1 GB in bytes — fixed original_size for all files.
 const ORIGINAL_SIZE: i64 = 2_100_000_000;
@@ -75,6 +92,7 @@ fn read_parquet_metadata(path: &Path) -> Result<FileMeta> {
         .schema()
         .as_ref()
         .clone();
+    let arrow_schema = normalize_view_types(&arrow_schema);
 
     Ok(FileMeta {
         min_ts,
@@ -104,6 +122,7 @@ async fn read_vortex_metadata(path: &Path) -> Result<FileMeta> {
         .dtype()
         .to_arrow_schema()
         .map_err(|e| anyhow::anyhow!("failed to convert vortex dtype to arrow schema: {e}"))?;
+    let arrow_schema = normalize_view_types(&arrow_schema);
 
     // Find _timestamp column index and extract min/max from file statistics
     let mut min_ts = i64::MAX;
