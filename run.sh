@@ -7,7 +7,7 @@ cat queries.sql | while read -r query; do
     sync
     echo -n "["
     for i in $(seq 1 $TRIES); do
-        RES=$(openobserve-60 sql -e "$query" -t 1y 2>&1 | grep "took:" | awk '{ print $(NF-1) }')
+        RES=$(openobserve sql -e "$query" -t 1y 2>&1 | grep "took:" | awk '{ print $(NF-1) }')
         [[ $RES != "" ]] && \
             echo -n "$RES" || \
             echo -n "null"

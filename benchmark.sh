@@ -9,8 +9,21 @@ STREAM_NAME=${STREAM_NAME:-"hits"}
 PARQUET_INPUT_DIR=${PARQUET_INPUT_DIR:-"clickbench/parquet"}
 PARQUET_TS_DIR=${PARQUET_TS_DIR:-"clickbench/parquet_ts"}
 
-export ZO_ROOT_USER_EMAIL=${ZO_ROOT_USER_EMAIL:-"root@example.com"}
-export ZO_ROOT_USER_PASSWORD=${ZO_ROOT_USER_PASSWORD:-"Complexpass#123"}
+# Create .env file for OpenObserve
+cat > .env << 'ENVEOF'
+ZO_ROOT_USER_EMAIL="root@example.com"
+ZO_ROOT_USER_PASSWORD="Complexpass#123"
+ZO_LOCAL_MODE=true
+ZO_PRINT_KEY_SQL=true
+ZO_UTF8_VIEW_ENABLED=false
+ZO_RESULT_CACHE_ENABLED=false
+ZO_FEATURE_PUSHDOWN_FILTER_ENABLED=false
+ENVEOF
+
+# Export variables from .env
+set -a
+source .env
+set +a
 export ZO_DATA_DIR="$OPENOBSERVE_DATA_DIR"
 
 wait_for_openobserve() {
@@ -37,7 +50,12 @@ stop_openobserve() {
 
 trap stop_openobserve EXIT
 
-# Step 0: Install Rust and build clickbench-convert if needed
+# Step 0: Install build dependencies and Rust
+if ! command -v g++ &> /dev/null; then
+    echo "Install C++ compiler and build tools"
+    sudo apt update && sudo apt install -y g++ build-essential
+fi
+
 if ! command -v cargo &> /dev/null; then
     echo "Install Rust"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rust-init.sh
